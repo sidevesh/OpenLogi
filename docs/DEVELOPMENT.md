@@ -11,6 +11,11 @@ build instructions, see the [README](../README.md).
   version floor is `actool`, which packaging uses to compile the app icon from
   its Icon Composer document. `OPENLOGI_DEVELOPER_DIR` overrides which Xcode is
   used when several are installed.
+- macOS banners: the overlay draws its keyboard-backlight, lock-key and low-battery indicators
+  with [Blip](https://github.com/sidevesh/blip), vendored as the `crates/openlogi-blip/vendor/blip`
+  submodule and built with SwiftPM (Xcode's Swift toolchain). Run
+  `git submodule update --init` after cloning. Without the submodule, without Swift, or with
+  `OPENLOGI_NO_BLIP=1`, the build prints a warning and the overlay keeps its own GPUI windows.
 - Linux: system libraries — on Debian/Ubuntu:
   `sudo apt-get install libudev-dev gcc g++ clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev pkg-config`
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is

@@ -79,6 +79,17 @@ impl Render for LockKeyView {
     }
 }
 
+/// Show `shown` as a Blip banner. Blip fades its own banner out, so nothing showing needs no call.
+pub(crate) fn present_banner(shown: Option<LockKeyChange>) {
+    if let Some(change) = shown {
+        let icon = match change.key {
+            LockKey::CapsLock => "caps-lock",
+            LockKey::NumLock | LockKey::ScrollLock => "keyboard",
+        };
+        openlogi_blip::message(&rust_i18n::t!(title_key(change)), None, icon);
+    }
+}
+
 /// Show `shown`, or close the indicator when it is `None`.
 ///
 /// A change while the window is open replaces its text in place, so presses

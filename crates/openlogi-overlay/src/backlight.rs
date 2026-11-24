@@ -64,6 +64,20 @@ impl Render for BacklightView {
     }
 }
 
+/// Show the backlight level as a Blip slider banner.
+pub(crate) fn present_banner(observation: &BacklightObservation) {
+    let level = relative_level(
+        observation.current_level,
+        max_backlight_level(observation.levels),
+    );
+    openlogi_blip::slider(
+        &rust_i18n::t!("device.backlight"),
+        f64::from(level),
+        "keyboard-brightness-low",
+        "keyboard-brightness-high",
+    );
+}
+
 fn relative_level(level: u8, max_level: u8) -> f32 {
     if max_level == 0 {
         0.0

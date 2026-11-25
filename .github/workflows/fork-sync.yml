@@ -1,0 +1,52 @@
+name: Fork sync
+
+# Keeps the fork's `fork` branch (the default branch) on top of upstream: rebuilds it from
+# upstream's master plus the branches in .github/fork/branches.txt, then starts a build when it
+# changed. Fork-only; see .github/fork/README.md.
+#
+# Pushing a change to upstream's own workflow files needs a token with the `workflow` scope, which
+# the built-in one can never have. Without the FORK_SYNC_TOKEN secret (a personal access token with
+# `repo` and `workflow`) the run fails on such a change; run .github/fork/sync.sh by hand then.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Rebuild the fork branch
+    # Only the fork runs this; upstream has neither the workflow nor this check to satisfy.
+    if: ${{ github.repository != 'AprilNEA/OpenLogi' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+
+      - name: Rebuild fork from upstream
+        id: sync
+        run: .github/fork/sync.sh
+
+      # Upstream's own workflows run on paid Namespace runners that a fork does not have, so any
+      # run of them would wait for a runner forever.
+      - name: Turn off upstream's workflows
+        run: |
+          gh workflow list --all --json id,path,state \
+            --jq '.[] | select(.state == "active") | select(.path | test("/fork-") | not) | select(.path | startswith(".github/workflows/")) | .id' |
+            while read -r id; do gh workflow disable "$id" || true; done
+
+      - name: Build the new fork
+        if: ${{ steps.sync.outputs.changed == 'true' }}
+        run: gh workflow run fork-build.yml --ref fork

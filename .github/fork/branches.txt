@@ -1,0 +1,3 @@
+# Branches of this fork that are merged on top of upstream's master to make the `fork` branch,
+# one per line. Remove a branch once upstream has merged it.
+feat/blip-osd

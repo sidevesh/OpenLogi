@@ -88,7 +88,11 @@ pub(crate) fn present_banner(shown: Option<LockKeyChange>) {
             LockKey::NumLock => ("keyboard.num_lock", "keyboard"),
             LockKey::ScrollLock => ("keyboard.scroll_lock", "keyboard"),
         };
-        let state = if change.engaged { "common.on" } else { "common.off" };
+        let state = if change.engaged {
+            "common.on"
+        } else {
+            "common.off"
+        };
         openlogi_blip::message(&rust_i18n::t!(name), &rust_i18n::t!(state), icon);
     }
 }

@@ -46,7 +46,8 @@ mod ffi {
             leading: *const c_char,
             trailing: *const c_char,
         );
-        fn blip_c_message(title: *const c_char, message: *const c_char, icon: *const c_char) -> i32;
+        fn blip_c_message(title: *const c_char, message: *const c_char, icon: *const c_char)
+        -> i32;
         fn blip_c_dismiss();
     }
 

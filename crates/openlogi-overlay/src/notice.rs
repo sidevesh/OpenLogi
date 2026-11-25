@@ -256,7 +256,7 @@ fn present_banner(notice: &Notice) {
         Some(charge) => format!("{device} · {charge}"),
         None => device.to_string(),
     };
-    openlogi_blip::message(&title, Some(&detail), "battery-low");
+    openlogi_blip::message(&title, &detail, "battery-low");
 }
 
 /// Close every notice window.

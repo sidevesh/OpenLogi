@@ -19,8 +19,9 @@ pub fn slider(title: &str, level: f64, leading: &str, trailing: &str) {
     let _ = (title, level, leading, trailing);
 }
 
-/// Shows an icon with a title and an optional second line.
-pub fn message(title: &str, detail: Option<&str>, icon: &str) {
+/// Shows an icon with a title and a second line. Like the system's banners, a Blip banner always
+/// has both lines: an empty `detail` shows nothing.
+pub fn message(title: &str, detail: &str, icon: &str) {
     #[cfg(blip)]
     ffi::message(title, detail, icon);
     #[cfg(not(blip))]
@@ -45,7 +46,7 @@ mod ffi {
             leading: *const c_char,
             trailing: *const c_char,
         );
-        fn blip_c_message(title: *const c_char, message: *const c_char, icon: *const c_char);
+        fn blip_c_message(title: *const c_char, message: *const c_char, icon: *const c_char) -> i32;
         fn blip_c_dismiss();
     }
 
@@ -63,17 +64,10 @@ mod ffi {
     }
 
     #[expect(unsafe_code, reason = "calls Blip's C interface")]
-    pub(super) fn message(title: &str, detail: Option<&str>, icon: &str) {
-        let (title, icon) = (c(title), c(icon));
-        let detail = detail.map(c);
-        // SAFETY: as above; a null detail means "no second line".
-        unsafe {
-            blip_c_message(
-                title.as_ptr(),
-                detail.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
-                icon.as_ptr(),
-            );
-        }
+    pub(super) fn message(title: &str, detail: &str, icon: &str) {
+        let (title, detail, icon) = (c(title), c(detail), c(icon));
+        // SAFETY: as above. It returns -1, showing nothing, only for an empty detail.
+        unsafe { blip_c_message(title.as_ptr(), detail.as_ptr(), icon.as_ptr()) };
     }
 
     #[expect(unsafe_code, reason = "calls Blip's C interface")]

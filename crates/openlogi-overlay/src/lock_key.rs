@@ -79,14 +79,17 @@ impl Render for LockKeyView {
     }
 }
 
-/// Show `shown` as a Blip banner. Blip fades its own banner out, so nothing showing needs no call.
+/// Show `shown` as a Blip banner: the key's name over "On" or "Off", the two lines every system
+/// banner has. Blip fades its own banner out, so nothing showing needs no call.
 pub(crate) fn present_banner(shown: Option<LockKeyChange>) {
     if let Some(change) = shown {
-        let icon = match change.key {
-            LockKey::CapsLock => "caps-lock",
-            LockKey::NumLock | LockKey::ScrollLock => "keyboard",
+        let (name, icon) = match change.key {
+            LockKey::CapsLock => ("keyboard.caps_lock", "caps-lock"),
+            LockKey::NumLock => ("keyboard.num_lock", "keyboard"),
+            LockKey::ScrollLock => ("keyboard.scroll_lock", "keyboard"),
         };
-        openlogi_blip::message(&rust_i18n::t!(title_key(change)), None, icon);
+        let state = if change.engaged { "common.on" } else { "common.off" };
+        openlogi_blip::message(&rust_i18n::t!(name), &rust_i18n::t!(state), icon);
     }
 }
 

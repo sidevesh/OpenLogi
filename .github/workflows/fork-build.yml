@@ -1,0 +1,338 @@
+name: Fork build
+
+# Builds this fork's macOS installers on GitHub-hosted runners and publishes them: a GitHub
+# Release with the DMGs, and the update feed (GitHub Pages) that installed fork builds check, so
+# they update from the fork instead of from upstream. Fork-only; see .github/fork/README.md.
+#
+# It runs the same `cargo xtask macos package` as upstream's release, signed with the fork's own
+# certificate instead of upstream's Developer ID. What upstream ships and a fork build does not:
+# Apple notarization, the virtual HID keyboard entitlement, and Sparkle (the built-in update
+# engine does the updating).
+
+on:
+  workflow_dispatch:
+    inputs:
+      lto:
+        description: Release LTO. `thin` fits a hosted runner; `fat` is what upstream builds with.
+        type: choice
+        options: [thin, fat]
+        default: thin
+      publish:
+        description: Publish the build (GitHub Release and update feed)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-build
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+  # Where installed fork builds look for updates. GitHub Pages serves it.
+  UPDATE_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+
+jobs:
+  plan:
+    name: Plan the build
+    if: ${{ github.repository != 'AprilNEA/OpenLogi' }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      # The updater only offers a strictly newer version, so a build of upstream's 0.9.0 plus this
+      # fork's changes needs a version above 0.9.0. It is the next patch release as a beta, which
+      # upstream's own tooling accepts and which stays below that release when upstream ships it.
+      # The number starts at 1000 so a tag never collides with one of upstream's betas.
+      - name: Name the version
+        id: plan
+        run: |
+          base=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          IFS=. read -r major minor patch <<< "${base%%-*}"
+          version="$major.$minor.$((patch + 1))-beta.$((1000 + GITHUB_RUN_NUMBER))"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Building $version on top of $base" >> "$GITHUB_STEP_SUMMARY"
+
+  macos:
+    name: macOS DMG (${{ matrix.arch }})
+    needs: plan
+    runs-on: macos-26
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Blip, the macOS banner library the overlay draws its indicators with.
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: fork-macos-release
+          cache-targets: false
+
+      - name: Select the Xcode both legs build with
+        run: |
+          xcode=$(printf '%s\n' /Applications/Xcode_26*.app | sort -V | tail -1)
+          if [ ! -d "$xcode" ]; then
+            echo "No Xcode 26 on this runner; the app icon cannot be compiled." >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          echo "OPENLOGI_DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Building with $xcode"
+
+      - name: Install packaging tools
+        run: brew install librsvg create-dmg cargo-bundle
+
+      # create-dmg lays the window out by scripting Finder, which a hosted runner may not allow.
+      # Try that first, and fall back to a plain DMG (the app and the Applications link) so a
+      # build never fails over the picture.
+      - name: Let create-dmg fall back to a plain DMG
+        run: |
+          real=$(command -v create-dmg)
+          shim="$RUNNER_TEMP/shim"
+          mkdir -p "$shim"
+          cat > "$shim/create-dmg" <<EOF
+          #!/bin/bash
+          out="\${@: -2:1}"
+          perl -e 'alarm 180; exec @ARGV' "$real" "\$@" && exit 0
+          echo "create-dmg: laying the window out through Finder failed; making a plain DMG" >&2
+          hdiutil info | awk '/\/Volumes\/OpenLogi/ {print \$1}' | sort -u | xargs -I{} hdiutil detach {} -force 2>/dev/null || true
+          rm -f "\$out"
+          exec "$real" --skip-jenkins "\$@"
+          EOF
+          chmod +x "$shim/create-dmg"
+          echo "$shim" >> "$GITHUB_PATH"
+
+      # The fork's own signing identity: a self-signed certificate kept in the FORK_SIGNING_P12
+      # secret. It is the same on every build, so macOS keeps the permissions you grant OpenLogi
+      # (Accessibility, Input Monitoring) across updates; an ad-hoc signature would change with
+      # every build and lose them.
+      - name: Import the fork signing certificate
+        env:
+          FORK_SIGNING_P12: ${{ secrets.FORK_SIGNING_P12 }}
+          FORK_SIGNING_P12_PASSWORD: ${{ secrets.FORK_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FORK_SIGNING_P12" ]; then
+            echo "::warning::No FORK_SIGNING_P12 secret; building unsigned. Permissions will not survive an update."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/fork-signing.keychain-db"
+          password=$(uuidgen)
+          printf '%s' "$FORK_SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/fork.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/fork.p12" -k "$keychain" -P "$FORK_SIGNING_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # A self-signed certificate signs without being trusted, but trusting it makes the
+          # signature verify on this runner, which the bundle checks below rely on.
+          openssl pkcs12 -in "$RUNNER_TEMP/fork.p12" -clcerts -nokeys -passin env:FORK_SIGNING_P12_PASSWORD -out "$RUNNER_TEMP/fork-cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/fork-cert.pem" || echo "::warning::could not trust the certificate"
+          rm -f "$RUNNER_TEMP/fork.p12"
+          security find-identity -p codesigning "$keychain"
+          echo "FORK_SIGN_IDENTITY=$(openssl x509 -in "$RUNNER_TEMP/fork-cert.pem" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p')" >> "$GITHUB_ENV"
+
+      - name: Stamp the version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$VERSION"
+
+      - name: Build and package OpenLogi
+        env:
+          # Baked into the app: the update feed it follows, and the key its downloads must be
+          # signed with. Without them it would read upstream's feed and install upstream's builds.
+          OPENLOGI_UPDATE_BASE_URL: ${{ env.UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ vars.FORK_MINISIGN_PUBLIC_KEY }}
+          CARGO_PROFILE_RELEASE_LTO: ${{ inputs.lto || 'thin' }}
+        run: |
+          set -euo pipefail
+          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Set the FORK_MINISIGN_PUBLIC_KEY repository variable}"
+          if [ "$CARGO_PROFILE_RELEASE_LTO" = thin ]; then
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+          fi
+          if [ -n "${FORK_SIGN_IDENTITY:-}" ]; then
+            cargo run -p xtask -- macos package --target ${{ matrix.target }} --sign-identity "$FORK_SIGN_IDENTITY"
+          else
+            cargo run -p xtask -- macos package --target ${{ matrix.target }}
+          fi
+
+      - name: Verify bundled architectures
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          for binary in \
+            "$app/Contents/MacOS/openlogi-desktop" \
+            "$app/Contents/MacOS/openlogi" \
+            "$app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent" \
+            "$app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"; do
+            archs=$(lipo -archs "$binary")
+            echo "$binary: $archs"
+            test "$archs" = "$EXPECTED_ARCH"
+          done
+
+      - name: Verify production bundle identities
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          plist() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist"; }
+          check() { # bundle expected-id expected-name
+            [ "$(plist "$1" CFBundleIdentifier)" = "$2" ]
+            [ "$(plist "$1" CFBundleName)" = "$3" ]
+            [ -f "$1/Contents/Resources/AppIcon.icns" ]
+          }
+          check "$app" "org.openlogi.openlogi" "OpenLogi"
+          check "$app/Contents/Library/LoginItems/OpenLogi Agent.app" "org.openlogi.agent" "OpenLogi Agent"
+          check "$app/Contents/Library/LoginItems/OpenLogi Overlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
+
+      - name: Verify the signature
+        if: ${{ env.FORK_SIGN_IDENTITY != '' }}
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dvv "$app" 2>&1 | grep -E "Authority|Identifier|TeamIdentifier|Signature"
+
+      - name: Collect the DMG
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          mkdir -p dist
+          cp target/release/OpenLogi.dmg "dist/OpenLogi-${TAG}-macos-${{ matrix.arch }}.dmg"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenLogi-macos-dmg-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release and update feed
+    needs: [plan, macos]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: fork-xtask
+          cache-targets: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: OpenLogi-macos-dmg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Sign the DMGs for the updater
+        env:
+          FORK_MINISIGN_SECRET_KEY: ${{ secrets.FORK_MINISIGN_SECRET_KEY }}
+          FORK_MINISIGN_PUBLIC_KEY: ${{ vars.FORK_MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          : "${FORK_MINISIGN_SECRET_KEY:?Set the FORK_MINISIGN_SECRET_KEY secret}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          key_file="$RUNNER_TEMP/fork-minisign.key"
+          umask 077
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$FORK_MINISIGN_SECRET_KEY" | tr -d '[:space:]' | base64 -d > "$key_file"
+          for dmg in dist/*.dmg; do
+            minisign -S -m "$dmg" -s "$key_file" -x "$dmg.minisig" -W
+            minisign -V -m "$dmg" -P "$FORK_MINISIGN_PUBLIC_KEY" -x "$dmg.minisig"
+          done
+          (cd dist && sha256sum -- *.dmg > SHA256SUMS)
+
+      # The feed record upstream's updater reads: the version, and each DMG's URL, size, SHA-256
+      # and signature.
+      - name: Write the update manifest
+        run: |
+          cargo run -q -p xtask -- release latest-json \
+            --dist dist --tag "$TAG" --base-url "$UPDATE_BASE_URL" --stage .release/stage
+
+      # One site holding the newest build: both channels offer it, and the DMGs it points at sit
+      # next to it, so the whole update path is on one host.
+      - name: Assemble the update site
+        run: |
+          set -euo pipefail
+          site=site
+          manifest=".release/stage/releases/$TAG/feed/latest.json"
+          mkdir -p "$site/releases/$TAG" "$site/channels/stable" "$site/channels/beta"
+          cp dist/*.dmg dist/*.dmg.minisig "$site/releases/$TAG/"
+          for channel in stable beta; do
+            jq --arg channel "$channel" --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+              '.channel = $channel | .release_url = $url' "$manifest" > "$site/channels/$channel/latest.json"
+          done
+          touch "$site/.nojekyll"
+          {
+            echo "<!doctype html><meta charset=utf-8><title>OpenLogi fork updates</title>"
+            echo "<h1>OpenLogi fork $VERSION</h1><ul>"
+            for dmg in dist/*.dmg; do
+              echo "<li><a href=\"releases/$TAG/$(basename "$dmg")\">$(basename "$dmg")</a></li>"
+            done
+            echo "</ul><p>Update feed for fork builds of OpenLogi.</p>"
+          } > "$site/index.html"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          OpenLogi built from this fork: upstream's \`master\` plus the branches in \`.github/fork/branches.txt\`.
+          Commit ${GITHUB_SHA:0:9}. Signed with the fork's own certificate and not notarized, so the first launch needs
+          **right-click, Open** (or \`xattr -dr com.apple.quarantine /Applications/OpenLogi.app\`). Installed builds update from
+          $UPDATE_BASE_URL.
+          EOF
+          gh release create "$TAG" dist/*.dmg dist/*.dmg.minisig dist/SHA256SUMS \
+            --target "$GITHUB_SHA" --prerelease --title "OpenLogi fork $VERSION" --notes-file notes.md
+
+  deploy:
+    name: Deploy the update feed
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -195,6 +195,13 @@ pub(crate) fn present(cx: &mut gpui::App, shelf: &Rc<RefCell<NoticeShelf>>, card
     if cards.is_empty() {
         return;
     }
+    if openlogi_blip::ENABLED {
+        // Blip draws one banner at a time: the newest notice, which replaces the last in place.
+        if let Some(newest) = cards.last() {
+            present_banner(newest);
+        }
+        return;
+    }
     #[cfg_attr(
         windows,
         expect(
@@ -236,6 +243,20 @@ pub(crate) fn present(cx: &mut gpui::App, shelf: &Rc<RefCell<NoticeShelf>>, card
         warn!(%error, "could not position the notice window");
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
+}
+
+/// Show `notice` as a Blip banner: the title, then the device with its charge.
+fn present_banner(notice: &Notice) {
+    let NoticeText {
+        title,
+        device,
+        charge,
+    } = notice_text(&notice.kind);
+    let detail = match charge {
+        Some(charge) => format!("{device} · {charge}"),
+        None => device.to_string(),
+    };
+    openlogi_blip::message(&title, &detail, "battery-low");
 }
 
 /// Close every notice window.

@@ -23,6 +23,13 @@ fn main() {
     // unrelated change happens to recompile this crate.
     println!("cargo:rerun-if-changed=../openlogi-ui/locales");
 
+    // Blip's Swift objects link the Swift runtime dynamically from the OS copy. A link argument
+    // from `openlogi-blip`'s own build script does not reach this binary, so the runtime
+    // search path is set here (harmless when Blip is left out).
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    }
+
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

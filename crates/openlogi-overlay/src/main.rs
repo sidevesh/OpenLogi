@@ -116,7 +116,11 @@ fn main() -> Result<()> {
                     warn!(%error, "could not connect to the display for a lock-key indicator");
                     continue;
                 }
-                cx.update(|cx| lock_key::present(cx, observed.shown));
+                if openlogi_blip::ENABLED {
+                    lock_key::present_banner(observed.shown);
+                } else {
+                    cx.update(|cx| lock_key::present(cx, observed.shown));
+                }
             }
         })
         .detach();
@@ -221,6 +225,13 @@ fn main() -> Result<()> {
                     && let Err(error) = cx.update(windowing::connect).await
                 {
                     warn!(%error, "could not connect to the display for the backlight indicator");
+                    continue;
+                }
+                if openlogi_blip::ENABLED {
+                    // Blip fades its own banner out, so a hidden backlight needs no call.
+                    if observation.visible {
+                        backlight::present_banner(&observation);
+                    }
                     continue;
                 }
                 cx.update(|cx| {

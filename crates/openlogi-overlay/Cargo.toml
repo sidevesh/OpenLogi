@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
 openlogi-hook = { path = "../openlogi-hook" }
+openlogi-blip = { path = "../openlogi-blip" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-ui = { path = "../openlogi-ui" }
 anyhow = { workspace = true }

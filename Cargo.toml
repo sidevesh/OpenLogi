@@ -21,6 +21,7 @@ members = [
     "crates/openlogi-desktop",
     "crates/openlogi-ui",
     "crates/openlogi-overlay",
+    "crates/openlogi-blip",
     "crates/openlogi-hook",
     "xtask",
 ]
